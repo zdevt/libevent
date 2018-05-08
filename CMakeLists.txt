@@ -430,7 +430,7 @@ CHECK_SYMBOL_EXISTS(F_SETFD fcntl.h EVENT__HAVE_SETFD)
 
 CHECK_TYPE_SIZE(fd_mask EVENT__HAVE_FD_MASK)
 
-CHECK_TYPE_SIZE(size_t EVENT__SIZEOF_SIZEE_T)
+CHECK_TYPE_SIZE(size_t EVENT__SIZEOF_SIZE_T)
 if(NOT EVENT__SIZEOF_SIZE_T)
   set(EVENT__size_t "unsigned")
   set(EVENT__SIZEOF_SIZE_T ${EVENT__SIZEOF_UNSIGNED})
@@ -1324,11 +1324,11 @@ file(RELATIVE_PATH
      "${EVENT_INSTALL_CMAKE_DIR}"
      "${CMAKE_INSTALL_PREFIX}/include")
 
-# Note the EVENT_CMAKE_DIR is defined in LibeventConfig.cmake.in,
+# Note the LIBEVENT_CMAKE_DIR is defined in LibeventConfig.cmake.in,
 # we escape it here so it's evaluated when it is included instead
-# so that the include dirs are givenrelative to where the
+# so that the include dirs are given relative to where the
 # config file is located.
-set(EVENT__INCLUDE_DIRS "\${EVENT_CMAKE_DIR}/${REL_INCLUDE_DIR}")
+set(EVENT_INSTALL_INCLUDE_DIR "\${LIBEVENT_CMAKE_DIR}/${REL_INCLUDE_DIR}")
 
 configure_file(${PROJECT_SOURCE_DIR}/cmake/LibeventConfig.cmake.in
                ${PROJECT_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/LibeventConfig.cmake

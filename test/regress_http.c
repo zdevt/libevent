@@ -314,11 +314,30 @@ http_basic_cb(struct evhttp_request *req, void *arg)
 	struct evbuffer *evb = evbuffer_new();
 	struct evhttp_connection *evcon;
 	int empty = evhttp_find_header(evhttp_request_get_input_headers(req), "Empty") != NULL;
+
 	event_debug(("%s: called\n", __func__));
 	evbuffer_add_printf(evb, BASIC_REQUEST_BODY);
 
 	evcon = evhttp_request_get_connection(req);
 	tt_assert(evhttp_connection_get_server(evcon) == arg);
+
+	{
+		const struct sockaddr *sa;
+		char addrbuf[128];
+
+		sa = evhttp_connection_get_addr(evcon);
+		tt_assert(sa);
+
+		if (sa->sa_family == AF_INET) {
+			evutil_format_sockaddr_port_((struct sockaddr *)sa, addrbuf, sizeof(addrbuf));
+			tt_assert(!strncmp(addrbuf, "127.0.0.1:", strlen("127.0.0.1:")));
+		} else if (sa->sa_family == AF_INET6) {
+			evutil_format_sockaddr_port_((struct sockaddr *)sa, addrbuf, sizeof(addrbuf));
+			tt_assert(!strncmp(addrbuf, "[::1]:", strlen("[::1]:")));
+		} else {
+			tt_fail_msg("Unsupported family");
+		}
+	}
 
 	/* For multi-line headers test */
 	{
@@ -4604,6 +4623,129 @@ http_request_extra_body_test(void *arg)
 		evbuffer_free(body);
 }
 
+struct http_newreqcb_test_state
+{
+	int connections_started;
+	int connections_noticed;
+	int connections_throttled;
+	int connections_good;
+	int connections_error;
+	int connections_done;
+};
+
+static void
+http_newreqcb_test_state_check(struct http_newreqcb_test_state* state)
+{
+	tt_int_op(state->connections_started, >=, 0);
+	tt_int_op(state->connections_started, >=, state->connections_noticed);
+	tt_int_op(state->connections_throttled, >=, state->connections_error);
+
+	tt_int_op(state->connections_done, <=, state->connections_started);
+	if (state->connections_good + state->connections_error == state->connections_started) {
+		tt_int_op(state->connections_throttled, ==, state->connections_error);
+		tt_int_op(state->connections_good + state->connections_error, ==, state->connections_done);
+		event_base_loopexit(exit_base, NULL);
+	}
+
+	return;
+end:
+	tt_fail();
+	exit(17);
+}
+
+static void
+http_request_done_newreqcb(struct evhttp_request *req, void *arg)
+{
+	struct http_newreqcb_test_state* state = arg;
+	if (req && evhttp_request_get_response_code(req) == HTTP_OK) {
+		++state->connections_good;
+		evhttp_request_set_error_cb(req, NULL);
+	}
+	++state->connections_done;
+
+	http_newreqcb_test_state_check(state);
+}
+
+static void
+http_request_error_newreqcb(enum evhttp_request_error err, void *arg)
+{
+	struct http_newreqcb_test_state* state = arg;
+	++state->connections_error;
+
+	http_newreqcb_test_state_check(state);
+}
+
+static int
+http_newreqcb(struct evhttp_request* req, void *arg)
+{
+	struct http_newreqcb_test_state* state = arg;
+	++state->connections_noticed;
+	http_newreqcb_test_state_check(state);
+	if (1 == state->connections_noticed % 7) {
+		state->connections_throttled++;
+		return -1;
+	}
+	return 0;
+}
+
+
+static void
+http_newreqcb_test(void *arg)
+{
+	struct basic_test_data *data = arg;
+	ev_uint16_t port = 0;
+	struct evhttp *http = http_setup(&port, data->base, 0);
+	struct evhttp_connection *evcons[100];
+	struct http_newreqcb_test_state newreqcb_test_state;
+	unsigned n;
+
+	exit_base = data->base;
+	test_ok = 0;
+
+	memset(&newreqcb_test_state, 0, sizeof(newreqcb_test_state));
+	memset(evcons, 0, sizeof(evcons));
+
+	evhttp_set_newreqcb(http, http_newreqcb, &newreqcb_test_state);
+
+	for (n = 0; n < sizeof(evcons)/sizeof(evcons[0]); ++n) {
+		struct evhttp_connection* evcon = NULL;
+		struct evhttp_request *req = NULL;
+		evcons[n] = evhttp_connection_base_new(data->base, NULL, "127.0.0.1", port);
+		evcon = evcons[n];
+		evhttp_connection_set_retries(evcon, 0);
+
+		tt_assert(evcon);
+
+		req = evhttp_request_new(http_request_done_newreqcb, &newreqcb_test_state);
+		evhttp_add_header(evhttp_request_get_output_headers(req), "Connection", "close");
+		evhttp_request_set_error_cb(req, http_request_error_newreqcb);
+
+		/* We give ownership of the request to the connection */
+		if (evhttp_make_request(evcon, req, EVHTTP_REQ_GET, "/test") == -1) {
+			tt_abort_msg("Couldn't make request");
+		}
+
+		++newreqcb_test_state.connections_started;
+		http_newreqcb_test_state_check(&newreqcb_test_state);
+	}
+
+	event_base_dispatch(data->base);
+
+	http_newreqcb_test_state_check(&newreqcb_test_state);
+	tt_int_op(newreqcb_test_state.connections_throttled, >, 0);
+
+ end:
+	evhttp_free(http);
+
+	for (n = 0; n < sizeof(evcons)/sizeof(evcons[0]); ++n) {
+		if (evcons[n])
+			evhttp_connection_free(evcons[n]);
+
+	}
+
+}
+
+
 #define HTTP_LEGACY(name)						\
 	{ #name, run_legacy_test_fn, TT_ISOLATED|TT_LEGACY, &legacy_setup, \
 		    http_##name##_test }
@@ -4724,6 +4866,8 @@ struct testcase_t http_testcases[] = {
 	HTTP(request_own),
 
 	HTTP(request_extra_body),
+
+	HTTP(newreqcb),
 
 #ifdef EVENT__HAVE_OPENSSL
 	HTTPS(basic),
